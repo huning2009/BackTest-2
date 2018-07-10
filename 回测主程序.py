@@ -23,12 +23,11 @@ reload(sys)
 sys.setdefaultencoding('utf8')
 import TSLPy2
 
-def dealData(bk,begd,endd,adjustPeriods,factorsInfo,FactorName,Path):
+def dealData(bk,begd,endd,adjustPeriods,factorsInfo,FactorName):
     #数据库连接引擎
     
     tableName = factorsInfo.get("tableName")
-    direction = factorsInfo.get("direction") #因子方向1为正序，0位逆序
-    reciprocal = factorsInfo.get("reciprocal") #因子值是否取倒数
+    direction = factorsInfo.get("direction")
     
     engine = create_engine('mysql://root:root@127.0.0.1/dwlh?charset=utf8') 
     
@@ -44,7 +43,7 @@ def dealData(bk,begd,endd,adjustPeriods,factorsInfo,FactorName,Path):
         
         adjustDay = adjustPeriods.ix[i,"date"]
         nextAdjustDay = adjustPeriods.ix[i,"nextAdjustDay"] 
-
+        print u"处理调仓日 "+adjustDay
         #取得因子值 
         sql = "select con_date,stock_code,{FactorName} from {tableName} where con_date = date('{con_date}');".format(FactorName=FactorName,tableName=tableName,con_date=adjustDay)
         # read_sql_query的两个参数: sql语句， 数据库连接 
@@ -57,9 +56,6 @@ def dealData(bk,begd,endd,adjustPeriods,factorsInfo,FactorName,Path):
         
         #对因子值按照从小打到排序分组，分为5组
         factor = factor.merge(BKStocks,on="stock_code")
-        if reciprocal ==1 :
-            factor[FactorName].apply(lambda x : 1/x  if x<>0 else x ) 
-            
         factor["group"] = pd.qcut(factor[FactorName].rank(method='first',ascending= (not direction)),5,labels=np.arange(1,6))
         factor.con_date = pd.to_datetime(factor.con_date) 
         
@@ -78,63 +74,45 @@ def dealData(bk,begd,endd,adjustPeriods,factorsInfo,FactorName,Path):
         adjustDatas.append(factorMergeClose)
         
     netValues = pd.concat(netValues)
-    
     netValues = (netValues+1).cumprod()
-
-    last1dayUP = np.round(((netValues.iloc[-1:,0].values[0] / netValues.iloc[-2:-1,0].values[0])-1)*100,2)
-    last5dayUP = np.round(((netValues.iloc[-1:,0].values[0] /  netValues.iloc[-6:-5,0].values[0]) -1)*100,2) 
-    last20dayUP = np.round(((netValues.iloc[-1:,0].values[0] /  netValues.iloc[-21:-20,0].values[0]-1 )*100),2)
-    AlldayUP = np.round(((netValues.iloc[-1:,0].values[0] /  netValues.iloc[0:1,0].values[0]-1 )*100),2)
-    
-    netValues.plot(figsize=(18,10),title=bk+" "+FactorName+u" 方向:"+str(direction)+
-                   u" 最近一天涨幅："+str(last1dayUP)+
-                   u" 最近一周涨幅："+str(last5dayUP)+
-                   u" 最近一月涨幅："+str(last20dayUP))    
-    
-    netValues.to_excel(Path+"\\"+bk+" "+FactorName+u"_净值分组数据.xlsx")
-    #pd.concat(adjustDatas).to_excel(Path+"\\"+bk+" "+FactorName+"_adjustDatas.xlsx")
-    pd.concat(factorGroup).to_excel(Path+"\\"+bk+" "+FactorName+"_factorGroup.xlsx")
-    plt.savefig(Path+"\\"+bk+" "+FactorName+".png")
-    plt.close()
-    return pd.DataFrame( {"最近一天涨幅":{bk+FactorName:last1dayUP},
-                          "最近一周涨幅":{bk+FactorName:last5dayUP},
-                          "最近一月涨幅":{bk+FactorName:last20dayUP},
-                          "回测期涨幅":{bk+FactorName:AlldayUP},
-                          })
-    
-if __name__ == '__main__':
-    
-    #获取调仓周期，周期分为月度和周度可以选择
-    begd=TSLPy2.EncodeDate(2018,1,3)
-    endd=TSLPy2.EncodeDate(2018,07,9)
-    adjustPeriods = TSLPy2.RemoteCallFunc('getAdjustPeriod',[begd,endd,u"月线"],{})
-    adjustPeriods = pd.DataFrame(adjustPeriods[1])
-    adjustPeriods["nextAdjustDay"] = adjustPeriods["date"].shift(-1)
+    netValues.plot(figsize=(18,10),title=FactorName)    
     Path = datetime.datetime.now().strftime("%Y-%m-%d")
+    
     if os.path.exists(Path)  and os.access(Path, os.R_OK):
         print Path , ' is exist!' 
     else:
         os.makedirs(Path) 
-    #板块名称
-    #bk = u"申万医药生物" 
-    #bk = u"申万电子" 
-    bk = u"申万计算机" 
-    factors = {"score":{"tableName":"stock_score_all","direction":1,"reciprocal":0},
-               "con_peg":{"tableName":"t_factor_value_all","direction":0,"reciprocal":0},
-               "con_pe":{"tableName":"t_factor_value_all", "direction":1,"reciprocal":1},
-               "con_eps":{"tableName":"t_factor_profit_all", "direction":1,"reciprocal":0},
-               "con_roe":{"tableName":"t_factor_profit_all", "direction":1,"reciprocal":0},
-               "con_np_yoy":{"tableName":"t_factor_growth_all", "direction":1,"reciprocal":0},
-               "con_or_yoy":{"tableName":"t_factor_growth_all", "direction":1,"reciprocal":0},
-               "con_npcgrate_4w":{"tableName":"t_factor_growth_all", "direction":1,"reciprocal":0},
-               }
+    
+    pd.concat(adjustDatas).to_excel(Path+"\\"+FactorName+"_adjustDatas.xlsx")
+    pd.concat(factorGroup).to_excel(Path+"\\"+FactorName+"_factorGroup.xlsx")
+    plt.savefig(Path+"\\"+FactorName+".png")
 
     
-    finalbx = []
-    for FactorName,factorsInfo in factors.iteritems():
-        finalbx.append(dealData(bk,begd,endd,adjustPeriods,factorsInfo,FactorName,Path) )
+if __name__ == '__main__':
     
-    pd.concat(finalbx).to_excel(Path+"\\"+bk+u"板块所有因子表现.xlsx")
+    #获取调仓周期，周期分为月度和周度可以选择
+    begd=TSLPy2.EncodeDate(2017,12,1)
+    endd=TSLPy2.EncodeDate(2018,07,05)
+    adjustPeriods = TSLPy2.RemoteCallFunc('getAdjustPeriod',[begd,endd,u"月线"],{})
+    adjustPeriods = pd.DataFrame(adjustPeriods[1])
+    adjustPeriods["nextAdjustDay"] = adjustPeriods["date"].shift(-1)
+    
+    #板块名称
+    bk = u"申万医药生物" 
+    factors = {"score":{"tableName":"stock_score_all","direction":1},
+               "con_peg":{"tableName":"t_factor_value_all","direction":1},
+               "con_pe":{"tableName":"t_factor_value_all", "direction":1},
+               "con_eps":{"tableName":"t_factor_profit_all", "direction":1},
+               #"con_roe":{"tableName":"t_factor_profit_all", "direction":1},
+               #"con_np_yoy":{"tableName":"t_factor_growth_all", "direction":1},
+               #"con_or_yoy":{"tableName":"t_factor_growth_all", "direction":1},
+               #"con_npcgrate_4w":{"tableName":"t_factor_growth_all", "direction":1},
+               }
+    
+    for FactorName,factorsInfo in factors.iteritems():
+        dealData(bk,begd,endd,adjustPeriods,factorsInfo,FactorName) 
+    
+
     
     #dajustDataFrame是分组数据    
     #dajustDataFrame = pd.concat(netValues)
