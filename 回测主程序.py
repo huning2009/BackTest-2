@@ -30,7 +30,7 @@ def dealData(bk,begd,endd,adjustPeriods,factorsInfo,FactorName,Path):
     direction = factorsInfo.get("direction") #因子方向1为正序，0位逆序
     reciprocal = factorsInfo.get("reciprocal") #因子值是否取倒数
     
-    engine = create_engine('mysql://root:root@127.0.0.1/dwlh?charset=utf8') 
+    engine = create_engine('mysql://root:root@172.16.158.142/dwlh?charset=utf8') 
     
     #从天软中获取收盘价信息，采用前复权方式 
     closePrice = pd.DataFrame(TSLPy2.RemoteCallFunc('getClosePrice',[bk,begd,endd],{})[1]) 
@@ -106,7 +106,7 @@ if __name__ == '__main__':
     
     #获取调仓周期，周期分为月度和周度可以选择
     begd=TSLPy2.EncodeDate(2018,1,3)
-    endd=TSLPy2.EncodeDate(2018,07,9)
+    endd=TSLPy2.EncodeDate(2018,07,10)
     adjustPeriods = TSLPy2.RemoteCallFunc('getAdjustPeriod',[begd,endd,u"月线"],{})
     adjustPeriods = pd.DataFrame(adjustPeriods[1])
     adjustPeriods["nextAdjustDay"] = adjustPeriods["date"].shift(-1)
@@ -116,10 +116,11 @@ if __name__ == '__main__':
     else:
         os.makedirs(Path) 
     #板块名称
-    #bk = u"申万医药生物" 
+    bk = u"申万医药生物" 
     #bk = u"申万电子" 
-    bk = u"申万计算机" 
-    factors = {"score":{"tableName":"stock_score_all","direction":1,"reciprocal":0},
+    #bk = u"申万计算机" 
+    factors = {"tcap":{"tableName":"t_factor_scale_all","direction":1,"reciprocal":0},
+                "score":{"tableName":"stock_score_all","direction":1,"reciprocal":0},
                "con_peg":{"tableName":"t_factor_value_all","direction":0,"reciprocal":0},
                "con_pe":{"tableName":"t_factor_value_all", "direction":1,"reciprocal":1},
                "con_eps":{"tableName":"t_factor_profit_all", "direction":1,"reciprocal":0},
