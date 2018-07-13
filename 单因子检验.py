@@ -16,6 +16,7 @@ import numpy as np
 import matplotlib.pyplot as plt 
 import matplotlib.dates as mdate
 import datetime,os
+import  seaborn as sns 
 
 import sys
 sys.path.append("D:\Program Files\Tinysoft\Analyse.NET") 
@@ -29,12 +30,13 @@ def dealData(bk,begd,endd,adjustPeriods,factorsInfo,FactorName,Path):
     tableName = factorsInfo.get("tableName")
     direction = factorsInfo.get("direction") #因子方向1为正序，0位逆序
     reciprocal = factorsInfo.get("reciprocal") #因子值是否取倒数
+    isLogDeal = factorsInfo.get("isLogDeal") #因子是否进行ln处理
     
     engine = create_engine('mysql://root:root@172.16.158.142/dwlh?charset=utf8') 
     
     #从天软中获取收盘价信息，采用前复权方式 
-    closePrice = pd.DataFrame(TSLPy2.RemoteCallFunc('getClosePrice',[bk,begd,endd],{})[1]) 
-    closePrice.date = pd.to_datetime(closePrice.date)
+    #closePrice = pd.DataFrame(TSLPy2.RemoteCallFunc('getClosePrice',[bk,begd,endd],{})[1]) 
+    #closePrice.date = pd.to_datetime(closePrice.date)
     
     adjustDatas = []
     netValues = [] 
@@ -45,23 +47,40 @@ def dealData(bk,begd,endd,adjustPeriods,factorsInfo,FactorName,Path):
         adjustDay = adjustPeriods.ix[i,"date"]
         nextAdjustDay = adjustPeriods.ix[i,"nextAdjustDay"] 
 
-        #取得因子值 
+        #取得所有股票在调仓日因子值 
         sql = "select con_date,stock_code,{FactorName} from {tableName} where con_date = date('{con_date}');".format(FactorName=FactorName,tableName=tableName,con_date=adjustDay)
         # read_sql_query的两个参数: sql语句， 数据库连接 
-        factor = pd.read_sql_query(sql, engine) 
+        factor = pd.read_sql_query(sql, engine)
         
-        #按照调仓日期取板块信息
+        #将日期字段设置为日期类型
+        factor.con_date = pd.to_datetime(factor.con_date) 
+        
+        #按照调仓日期取板块信息，天软函数getbkByName，会剔除调仓日一字涨跌停、停牌以及上市时间小于120日的股票
         BKStocks = TSLPy2.RemoteCallFunc('getbkByName',[bk,TSLPy2.EncodeDate(int(adjustDay[:4]),int(adjustDay[5:7]),int(adjustDay[8:10]))],{}) 
         BKStocks = pd.DataFrame(BKStocks[1],columns=["TSLCode"])
         BKStocks["stock_code"] = BKStocks["TSLCode"].apply(lambda x :x[2:]) 
         
-        #对因子值按照从小打到排序分组，分为5组
+        #对因子值和板块合并
         factor = factor.merge(BKStocks,on="stock_code")
-        if reciprocal ==1 :
-            factor[FactorName].apply(lambda x : 1/x  if x<>0 else x ) 
+        #判断是否对因子值进行倒序处理
+        if reciprocal ==1 : 
+            factor[FactorName]=factor[FactorName].apply(lambda x : 1/x  if x<>0 else x ) 
             
+        if isLogDeal ==1 :
+            factor[FactorName]=factor[FactorName].apply(np.log) 
+        
+        #替换异常值
+        factorMedia = factor[FactorName].median() 
+        MAD =  (factor[FactorName]-factorMedia).apply(abs).median()   
+        factor[factor[FactorName]>(factorMedia+3*1.4826*MAD)][FactorName] = factorMedia+3*1.4826*MAD
+        factor[factor[FactorName]<(factorMedia-3*1.4826*MAD)][FactorName] = factorMedia-3*1.4826*MAD
+        
+        #zscore标准化
+        factorMean = factor[FactorName].mean()
+        factorStd = factor[FactorName].std()
+        factor[FactorName] = factor[FactorName].apply(lambda x : (x-factorMean)/factorStd )
+        
         factor["group"] = pd.qcut(factor[FactorName].rank(method='first',ascending= (not direction)),10,labels=np.arange(1,11))
-        factor.con_date = pd.to_datetime(factor.con_date) 
         
         #取得期间股票行情
         adjustClosePrice = closePrice[(closePrice["date"]>adjustDay) & (closePrice["date"]<=nextAdjustDay)]
@@ -107,20 +126,20 @@ if __name__ == '__main__':
     #获取调仓周期，周期分为月度和周度可以选择
     begd=TSLPy2.EncodeDate(2018,1,3)
     endd=TSLPy2.EncodeDate(2018,07,12)
+    #设置调仓周期为月度调仓
     adjustPeriods = TSLPy2.RemoteCallFunc('getAdjustPeriod',[begd,endd,u"月线"],{})
     adjustPeriods = pd.DataFrame(adjustPeriods[1])
     adjustPeriods["nextAdjustDay"] = adjustPeriods["date"].shift(-1)
-    Path = datetime.datetime.now().strftime("%Y-%m-%d")
+    #在当前目录下新增路径，如没有文件夹则新增文件夹
+    Path = u"单因子检验\\"+datetime.datetime.now().strftime("%Y-%m-%d")
     if os.path.exists(Path)  and os.access(Path, os.R_OK):
         print Path , ' is exist!' 
     else:
         os.makedirs(Path) 
     #板块名称
-    bk = u"申万医药生物" 
-    #bk = u"申万电子" 
-    #bk = u"申万计算机" 
-    factors = {#"tcap":{"tableName":"t_factor_scale_all","direction":1,"reciprocal":0},
-                "score":{"tableName":"stock_score_all","direction":1,"reciprocal":0},
+    bk = u"A股" 
+    factors = {"tcap":{"tableName":"t_factor_scale_all","direction":1,"reciprocal":0,"isLogDeal":1},
+               # "score":{"tableName":"stock_score_all","direction":1,"reciprocal":0},
                #"con_peg":{"tableName":"t_factor_value_all","direction":0,"reciprocal":0},
                #"con_pe":{"tableName":"t_factor_value_all", "direction":1,"reciprocal":1},
                #"con_eps":{"tableName":"t_factor_profit_all", "direction":1,"reciprocal":0},
