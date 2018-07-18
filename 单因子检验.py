@@ -17,6 +17,8 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdate
 import datetime,os
 import  seaborn as sns 
+import statsmodels.api as sm
+from patsy import dmatrices
 
 import sys
 sys.path.append("D:\Program Files\Tinysoft\Analyse.NET") 
@@ -34,13 +36,7 @@ def dealData(bk,begd,endd,adjustPeriods,factorsInfo,FactorName,Path):
     
     engine = create_engine('mysql://root:root@172.16.158.142/dwlh?charset=utf8') 
     
-    #从天软中获取收盘价信息，采用前复权方式 
-    #closePrice = pd.DataFrame(TSLPy2.RemoteCallFunc('getClosePrice',[bk,begd,endd],{})[1]) 
-    #closePrice.date = pd.to_datetime(closePrice.date)
-    
-    adjustDatas = []
-    netValues = [] 
-    factorGroup = []
+    periedValues = []
     #循环每次调仓日期
     for i in adjustPeriods.index[:-1]:
         
@@ -56,9 +52,10 @@ def dealData(bk,begd,endd,adjustPeriods,factorsInfo,FactorName,Path):
         factor.con_date = pd.to_datetime(factor.con_date) 
         
         #按照调仓日期取板块信息，天软函数getbkByName，会剔除调仓日一字涨跌停、停牌以及上市时间小于120日的股票
-        BKStocks = TSLPy2.RemoteCallFunc('getbkByName',[bk,TSLPy2.EncodeDate(int(adjustDay[:4]),int(adjustDay[5:7]),int(adjustDay[8:10]))],{}) 
-        BKStocks = pd.DataFrame(BKStocks[1],columns=["TSLCode"])
-        BKStocks["stock_code"] = BKStocks["TSLCode"].apply(lambda x :x[2:]) 
+        BKStocks = TSLPy2.RemoteCallFunc('getbkByName2',[bk,TSLPy2.EncodeDate(int(adjustDay[:4]),int(adjustDay[5:7]),int(adjustDay[8:10]))],{}) 
+        BKStocks = pd.DataFrame(BKStocks[1])
+        BKStocks["SWNAME"] = BKStocks["SWNAME"].apply(lambda x : x.decode('gbk'))
+        BKStocks["stock_code"] = BKStocks["id"].apply(lambda x :x[2:]) 
         
         #对因子值和板块合并
         factor = factor.merge(BKStocks,on="stock_code")
@@ -72,54 +69,59 @@ def dealData(bk,begd,endd,adjustPeriods,factorsInfo,FactorName,Path):
         #替换异常值
         factorMedia = factor[FactorName].median() 
         MAD =  (factor[FactorName]-factorMedia).apply(abs).median()   
-        factor[factor[FactorName]>(factorMedia+3*1.4826*MAD)][FactorName] = factorMedia+3*1.4826*MAD
-        factor[factor[FactorName]<(factorMedia-3*1.4826*MAD)][FactorName] = factorMedia-3*1.4826*MAD
+        factor.loc[factor[FactorName]>(factorMedia+3*1.4826*MAD),FactorName]= factorMedia+3*1.4826*MAD
+        factor.loc[factor[FactorName]<(factorMedia-3*1.4826*MAD),FactorName]= factorMedia-3*1.4826*MAD
         
         #zscore标准化
         factorMean = factor[FactorName].mean()
         factorStd = factor[FactorName].std()
-        factor[FactorName] = factor[FactorName].apply(lambda x : (x-factorMean)/factorStd )
+        factor[FactorName] = factor[FactorName].apply(lambda x : (x-factorMean)/factorStd)
         
-        factor["group"] = pd.qcut(factor[FactorName].rank(method='first',ascending= (not direction)),10,labels=np.arange(1,11))
+        #下期收益序列：
+        stokzf = pd.DataFrame(TSLPy2.RemoteCallFunc('getStockZF',[bk,TSLPy2.EncodeDate(int(adjustDay[:4]),int(adjustDay[5:7]),int(adjustDay[8:10])),
+                                                                  TSLPy2.EncodeDate(int(nextAdjustDay[:4]),int(nextAdjustDay[5:7]),int(nextAdjustDay[8:10]))],{})[1])
+        factor= factor.merge(stokzf,on="stock_code")
+        factor.set_index("stock_code",inplace=True)
         
-        #取得期间股票行情
-        adjustClosePrice = closePrice[(closePrice["date"]>adjustDay) & (closePrice["date"]<=nextAdjustDay)]
-        factorMergeClose = factor.merge(adjustClosePrice,how='right',left_on=["stock_code"],right_on=["stock_code"])
-        factorMergeClose = factorMergeClose.groupby(["stock_code"],group_keys=False).apply(lambda x : x.sort_values(by=["date"]).fillna(method="pad").dropna())
-        factorMergeClose["stockNetValues"] = factorMergeClose.groupby(["stock_code"])["stockzf"].apply(lambda x :(x/100+1).cumprod())
+        #计算IC值和RANKIC值
+        IC = factor["zf"].corr(factor[FactorName])
+        rankIC = factor["zf"].corr(factor[FactorName],method="spearman")
         
-        groupNetval = factorMergeClose.groupby(["date","group"])["stockNetValues"].mean().unstack(1) 
-        groupNetval1 = groupNetval.ix[:1,]-1
-        groupNetval = groupNetval.pct_change().fillna(value=groupNetval1) 
+        #回归进行行业中性处理
+        factor = factor.dropna()
+        y, X = dmatrices('zf ~ {factorName} + SWNAME'.format(factorName=FactorName), data=factor, return_type='dataframe')
         
-        factorGroup.append(factor)
-        netValues.append(groupNetval)
-        adjustDatas.append(factorMergeClose)
+        """
+        y= factor["zf"]
+        factor["cons"]=1.0
+        colums = ["cons",FactorName] 
+        X= factor[colums].join( pd.get_dummies(factor["SWNAME"])) #将行业设置为哑变量
+        """
+        #res = sm.OLS(y, X).fit() #通过OLS进行回归
+        res2= sm.RLM(y, X).fit()  #通过RLM进行回归
+        #res3= sm.WLS(y, X).fit() #通过WLS进行回归
+        factorParam = res2.params[FactorName]
+        factorT = res2.tvalues[FactorName]
         
-    netValues = pd.concat(netValues)
-    
-    netValues = (netValues+1).cumprod()
+        periedValues.append(pd.DataFrame({"FactorName":FactorName,
+                      "adjustDay":adjustDay,
+                      "IC":IC,
+                      "rankIC":rankIC,
+                      "factorbeta":factorParam,
+                      "factorT":factorT},index=0))
+        
+        """
+        fig, ax = plt.subplots(figsize=(8,6))
 
-    last1dayUP = np.round(((netValues.iloc[-1:,0].values[0] / netValues.iloc[-2:-1,0].values[0])-1)*100,2)
-    last5dayUP = np.round(((netValues.iloc[-1:,0].values[0] /  netValues.iloc[-6:-5,0].values[0]) -1)*100,2) 
-    last20dayUP = np.round(((netValues.iloc[-1:,0].values[0] /  netValues.iloc[-21:-20,0].values[0]-1 )*100),2)
-    AlldayUP = np.round(((netValues.iloc[-1:,0].values[0] /  netValues.iloc[0:1,0].values[0]-1 )*100),2)
-    
-    netValues.plot(figsize=(18,10),title=bk+" "+FactorName+u" 方向:"+str(direction)+
-                   u" 最近一天涨幅："+str(last1dayUP)+
-                   u" 最近一周涨幅："+str(last5dayUP)+
-                   u" 最近一月涨幅："+str(last20dayUP))    
-    
-    netValues.to_excel(Path+"\\"+bk+" "+FactorName+u"_净值分组数据.xlsx")
-    #pd.concat(adjustDatas).to_excel(Path+"\\"+bk+" "+FactorName+"_adjustDatas.xlsx")
-    pd.concat(factorGroup).to_excel(Path+"\\"+bk+" "+FactorName+"_factorGroup.xlsx")
-    plt.savefig(Path+"\\"+bk+" "+FactorName+".png")
-    plt.close()
-    return pd.DataFrame( {"最近一天涨幅":{bk+FactorName:last1dayUP},
-                          "最近一周涨幅":{bk+FactorName:last5dayUP},
-                          "最近一月涨幅":{bk+FactorName:last20dayUP},
-                          "回测期涨幅":{bk+FactorName:AlldayUP},
-                          })
+        ax.plot(factor["con_roe"], y, 'o', label="Data")
+        #ax.plot(x["con_roe"], y_true, 'b-', label="True")
+        ax.plot(factor["con_roe"], res2.fittedvalues, 'r--.', label="RLMPredicted")
+        ax.plot(factor["con_roe"], res.fittedvalues, 'b--.', label="OLSPredicted")
+        legend = ax.legend(loc="best")
+        """
+        
+    return periedValues
+        
     
 if __name__ == '__main__':
     
@@ -138,12 +140,12 @@ if __name__ == '__main__':
         os.makedirs(Path) 
     #板块名称
     bk = u"A股" 
-    factors = {"tcap":{"tableName":"t_factor_scale_all","direction":1,"reciprocal":0,"isLogDeal":1},
+    factors = {#"tcap":{"tableName":"t_factor_scale_all","direction":1,"reciprocal":0,"isLogDeal":1},
                # "score":{"tableName":"stock_score_all","direction":1,"reciprocal":0},
                #"con_peg":{"tableName":"t_factor_value_all","direction":0,"reciprocal":0},
                #"con_pe":{"tableName":"t_factor_value_all", "direction":1,"reciprocal":1},
                #"con_eps":{"tableName":"t_factor_profit_all", "direction":1,"reciprocal":0},
-               #"con_roe":{"tableName":"t_factor_profit_all", "direction":1,"reciprocal":0},
+               "con_roe":{"tableName":"t_factor_profit_all", "direction":1,"reciprocal":0},
               #"con_np_yoy":{"tableName":"t_factor_growth_all", "direction":1,"reciprocal":0},
               # "con_or_yoy":{"tableName":"t_factor_growth_all", "direction":1,"reciprocal":0},
                #"con_npcgrate_4w":{"tableName":"t_factor_growth_all", "direction":1,"reciprocal":0},
@@ -153,8 +155,8 @@ if __name__ == '__main__':
     finalbx = []
     for FactorName,factorsInfo in factors.iteritems():
         finalbx.append(dealData(bk,begd,endd,adjustPeriods,factorsInfo,FactorName,Path) )
-    
-    pd.concat(finalbx).to_excel(Path+"\\"+bk+u"板块所有因子表现.xlsx")
+    result = pd.concat(finalbx)
+    #pd.concat(finalbx).to_excel(Path+"\\"+bk+u"板块所有因子表现.xlsx")
     
     #dajustDataFrame是分组数据    
     #dajustDataFrame = pd.concat(netValues)
